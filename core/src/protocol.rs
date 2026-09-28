@@ -511,13 +511,23 @@ pub fn meta_display_config(w: u16, h: u16) -> [u8; 46] {
     m
 }
 
-// windows 1024x768 whole-frame tiles: (x, y, w, h, jpeg size aim)
-pub const KEYFRAME_TILES: [(u16, u16, u16, u16, usize); 4] = [
-    (0, 0, 624, 416, 34004),
-    (624, 0, 400, 416, 12248),
-    (0, 416, 624, 352, 16058),
-    (624, 416, 400, 352, 14155),
-];
+// jpeg bytes per pixel windows aims for: its 1024x768 whole frame is 34004 + 12248 + 16058 + 14155 bytes
+pub const JPEG_BYTES_PER_PX: f64 = 76465.0 / (1024.0 * 768.0);
+// biggest tile windows client ever sends
+pub const MAX_TILE_W: u16 = 624;
+pub const MAX_TILE_H: u16 = 416;
+
+// whole-frame tiles for any stream size, cut like windows: (x, y, w, h, jpeg size aim)
+pub fn keyframe_tiles(w: u16, h: u16) -> Vec<(u16, u16, u16, u16, usize)> {
+    let mut out = Vec::new();
+    for y in (0..h).step_by(MAX_TILE_H as usize) {
+        for x in (0..w).step_by(MAX_TILE_W as usize) {
+            let (tw, th) = (MAX_TILE_W.min(w - x), MAX_TILE_H.min(h - y));
+            out.push((x, y, tw, th, (tw as f64 * th as f64 * JPEG_BYTES_PER_PX) as usize));
+        }
+    }
+    out
+}
 
 // one jpeg tile + place (16-byte descriptor on wire)
 pub struct VideoTile<'a> {

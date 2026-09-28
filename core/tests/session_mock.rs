@@ -121,7 +121,7 @@ struct MovingSquare(usize);
 
 impl FrameGrabber for MovingSquare {
     fn grab(&mut self) -> Option<Vec<u8>> {
-        let (w, h) = (1024usize, 768usize);
+        let (w, h) = (libremp_core::stream_w() as usize, libremp_core::stream_h() as usize);
         let mut rgb = vec![90u8; w * h * 3];
         let x0 = (self.0 * 40) % (w - 20);
         for y in 300..320 {
@@ -206,8 +206,10 @@ fn fake_projector_session() {
     let seen = seen.lock().unwrap();
     assert!(seen.goodbye, "client sends 0x0104 on stop");
     let b = blocks(&seen.video);
-    assert_eq!(b[0], (true, 4, 1024 * 768), "first frame whole, with meta");
-    let partial: Vec<_> = b[1..].iter().filter(|x| x.2 < 1024 * 768).collect();
+    let (w, h) = (libremp_core::stream_w(), libremp_core::stream_h());
+    let whole = libremp_core::protocol::keyframe_tiles(w as u16, h as u16).len() as u32;
+    assert_eq!(b[0], (true, whole, w * h), "first frame whole, with meta");
+    let partial: Vec<_> = b[1..].iter().filter(|x| x.2 < w * h).collect();
     assert!(partial.len() >= 8, "later frames send only changed parts: {b:?}");
     assert!(partial.iter().all(|x| !x.0 && x.2 <= 2 * 64 * 32), "parts small, no meta: {b:?}");
     drop(seen);

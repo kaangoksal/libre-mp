@@ -23,6 +23,17 @@ fn main() {
         pick_wifi()
     };
 
+    // --size WxH: stream resolution (default 1920x1080)
+    if let Some(size) = get_arg("--size") {
+        match size.to_lowercase().split_once('x').and_then(|(w, h)| Some((w.parse().ok()?, h.parse().ok()?))) {
+            Some((w, h)) => libremp_core::set_stream_size(w, h),
+            None => {
+                eprintln!("[-] --size wants WxH, like 1920x1080");
+                std::process::exit(1);
+            }
+        }
+    }
+
     let opts = CastOptions {
         ssid,
         password,

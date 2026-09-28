@@ -1,6 +1,6 @@
 use turbojpeg::{Compressor, Image, PixelFormat, Subsamp};
 
-use crate::{STREAM_W, STREAM_H, JPEG_QUALITY};
+use crate::{stream_h, stream_w, JPEG_QUALITY};
 
 // ─── backend pick ───────────────────────────────────────────────────────────
 
@@ -98,7 +98,7 @@ impl XcapGrabber {
         };
         let dynimg = image::DynamicImage::ImageRgba8(rgba);
         let resized =
-            dynimg.resize_exact(STREAM_W, STREAM_H, image::imageops::FilterType::Triangle);
+            dynimg.resize_exact(stream_w(), stream_h(), image::imageops::FilterType::Triangle);
         Some(resized.to_rgb8().into_raw())
     }
 
@@ -182,12 +182,12 @@ impl FrameGrabber for PipeWireGrabber {
     fn grab(&mut self) -> Option<Vec<u8>> {
         // pipewire only sends on change, so repeat newest
         if let Some(f) = self.stream.take_latest() {
-            self.last = Some(resize_4ch_to_rgb(&f.rgba, f.width, f.height, STREAM_W, STREAM_H, [0, 1, 2]));
+            self.last = Some(resize_4ch_to_rgb(&f.rgba, f.width, f.height, stream_w(), stream_h(), [0, 1, 2]));
         } else if self.last.is_none() {
             // first frame: give compositor a moment
             std::thread::sleep(std::time::Duration::from_millis(50));
             if let Some(f) = self.stream.take_latest() {
-                self.last = Some(resize_4ch_to_rgb(&f.rgba, f.width, f.height, STREAM_W, STREAM_H, [0, 1, 2]));
+                self.last = Some(resize_4ch_to_rgb(&f.rgba, f.width, f.height, stream_w(), stream_h(), [0, 1, 2]));
             }
         }
         self.last.clone()
@@ -230,10 +230,10 @@ impl FrameGrabber for ScrapGrabber {
             match self.capturer.frame() {
                 Ok(frame) => {
                     #[allow(unused_mut)]
-                    let mut rgb = resize_bgra_to_rgb(&frame, self.w, self.h, STREAM_W, STREAM_H);
+                    let mut rgb = resize_bgra_to_rgb(&frame, self.w, self.h, stream_w(), stream_h());
                     #[cfg(target_os = "linux")]
                     if let Some(c) = &self.cursor {
-                        c.draw_into_rgb(&mut rgb, STREAM_W, STREAM_H, self.w, self.h);
+                        c.draw_into_rgb(&mut rgb, stream_w(), stream_h(), self.w, self.h);
                     }
                     return Some(rgb);
                 }
@@ -356,8 +356,8 @@ fn resize_4ch_to_rgb(src: &[u8], sw: u32, sh: u32, dw: u32, dh: u32, rgb: [usize
 
 // copy one tile out of screen rgb
 fn extract_tile(screen: &[u8], x: u16, y: u16, w: u16, h: u16) -> Vec<u8> {
-    let sw = STREAM_W;
-    let sh = STREAM_H;
+    let sw = stream_w();
+    let sh = stream_h();
     let cx = (x as u32).min(sw.saturating_sub(1));
     let cy = (y as u32).min(sh.saturating_sub(1));
     let cw = (w as u32).min(sw - cx);
@@ -387,8 +387,8 @@ pub fn encode_tile_adaptive(
     h: u16,
     max_size: usize,
 ) -> Vec<u8> {
-    let cw = (w as u32).min(STREAM_W - (x as u32).min(STREAM_W.saturating_sub(1)));
-    let ch = (h as u32).min(STREAM_H - (y as u32).min(STREAM_H.saturating_sub(1)));
+    let cw = (w as u32).min(stream_w() - (x as u32).min(stream_w().saturating_sub(1)));
+    let ch = (h as u32).min(stream_h() - (y as u32).min(stream_h().saturating_sub(1)));
 
     let rgb_buf = extract_tile(screen, x, y, w, h);
 
@@ -521,8 +521,8 @@ pub fn capture_windows() -> Option<Vec<u8>> {
             &bgra_buf,
             width as u32,
             height as u32,
-            crate::STREAM_W,
-            crate::STREAM_H,
+            crate::stream_w(),
+            crate::stream_h(),
         ))
     }
 }

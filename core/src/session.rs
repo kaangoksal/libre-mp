@@ -8,8 +8,8 @@ use std::time::{Duration, Instant};
 use serde::Serialize;
 
 use crate::capture::{self, FrameGrabber};
-use crate::protocol::{self, VideoTile, KEYFRAME_TILES};
-use crate::{STREAM_H, STREAM_W};
+use crate::protocol::{self, VideoTile, MAX_TILE_H, MAX_TILE_W};
+use crate::{stream_h, stream_w};
 
 const TARGET_FPS: u64 = 24;
 // silent audio slice cadence on aux channel, same as windows client
@@ -18,9 +18,6 @@ const AUDIO_SLICE: Duration = Duration::from_millis(100);
 const FULL_REFRESH: Duration = Duration::from_secs(1);
 // change detection grid, 16-aligned for 4:2:0 jpeg
 const CELL: usize = 32;
-// biggest tile windows client ever sends
-const MAX_TILE_W: u16 = 624;
-const MAX_TILE_H: u16 = 416;
 // parts merged down to this many; past NOISE parts or this much area, whole picture is cheaper
 const MAX_RECTS: usize = 8;
 const NOISE_RECTS: usize = 64;
@@ -157,7 +154,10 @@ enum Plan {
 // keep session alive, grab, send whole or changed parts, hold fps
 fn stream(client: &mut protocol::EpsonClient, grabber: &mut dyn FrameGrabber, running: &AtomicBool, full_only: bool) -> String {
     let my_ip = client.my_ip;
-    let meta = protocol::meta_display_config(STREAM_W as u16, STREAM_H as u16);
+    let (sw, sh) = (stream_w() as u16, stream_h() as u16);
+    let meta = protocol::meta_display_config(sw, sh);
+    let keyframe_tiles = protocol::keyframe_tiles(sw, sh);
+    eprintln!("[*] Stream size {sw}x{sh}, {} tiles per whole frame", keyframe_tiles.len());
     let frame_budget = Duration::from_micros(1_000_000 / TARGET_FPS);
     let mut last_audio = Instant::now();
     let mut last_heartbeat = Instant::now();
@@ -193,7 +193,7 @@ fn stream(client: &mut protocol::EpsonClient, grabber: &mut dyn FrameGrabber, ru
         let t_capture = t0.elapsed();
 
         let plan = match &prev {
-            Some(p) if !full_only && last_full.elapsed() < FULL_REFRESH => match dirty_rects(p, &screen) {
+            Some(p) if !full_only && last_full.elapsed() < FULL_REFRESH => match dirty_rects(p, &screen, sw as usize, sh as usize) {
                 Some(r) if r.is_empty() => Plan::Skip,
                 Some(r) => Plan::Partial(r),
                 None => Plan::Full,
@@ -205,11 +205,11 @@ fn stream(client: &mut protocol::EpsonClient, grabber: &mut dyn FrameGrabber, ru
             Plan::Skip => None,
             Plan::Full => {
                 last_full = Instant::now();
-                let jpegs: Vec<Vec<u8>> = KEYFRAME_TILES
+                let jpegs: Vec<Vec<u8>> = keyframe_tiles
                     .iter()
                     .map(|&(x, y, w, h, budget)| capture::encode_tile_adaptive(&screen, x, y, w, h, budget))
                     .collect();
-                let tiles: Vec<VideoTile> = KEYFRAME_TILES
+                let tiles: Vec<VideoTile> = keyframe_tiles
                     .iter()
                     .zip(&jpegs)
                     .map(|(&(x, y, w, h, _), jpeg)| VideoTile { jpeg, x, y, w, h })
@@ -266,21 +266,19 @@ fn stream(client: &mut protocol::EpsonClient, grabber: &mut dyn FrameGrabber, ru
 
 // jpeg size aim for a part, same bytes-per-pixel as whole-frame tiles
 fn byte_budget(r: &Rect) -> usize {
-    let full: usize = KEYFRAME_TILES.iter().map(|t| t.4).sum();
-    let area = r.w as usize * r.h as usize;
-    (full * area / (STREAM_W as usize * STREAM_H as usize)).max(2048)
+    ((r.w as f64 * r.h as f64 * protocol::JPEG_BYTES_PER_PX) as usize).max(2048)
 }
 
 // changed areas between two rgb frames. empty = no change, none = send whole frame
-pub fn dirty_rects(prev: &[u8], cur: &[u8]) -> Option<Vec<Rect>> {
-    let (w, h) = (STREAM_W as usize, STREAM_H as usize);
+pub fn dirty_rects(prev: &[u8], cur: &[u8], w: usize, h: usize) -> Option<Vec<Rect>> {
     if prev.len() != cur.len() || cur.len() != w * h * 3 {
         return None;
     }
-    let (cols, rows) = (w / CELL, h / CELL);
-    let row_bytes = CELL * 3;
+    // edge cells are cut short when size is not a multiple of CELL (720, 1080)
+    let (cols, rows) = (w.div_ceil(CELL), h.div_ceil(CELL));
     let changed = |r: usize, c: usize| {
-        (r * CELL..(r + 1) * CELL).any(|y| {
+        let row_bytes = CELL.min(w - c * CELL) * 3;
+        (r * CELL..((r + 1) * CELL).min(h)).any(|y| {
             let at = (y * w + c * CELL) * 3;
             prev[at..at + row_bytes] != cur[at..at + row_bytes]
         })
@@ -319,9 +317,11 @@ pub fn dirty_rects(prev: &[u8], cur: &[u8]) -> Option<Vec<Rect>> {
     }
     done.append(&mut open);
 
-    let px = |v: usize| (v * CELL) as u16;
-    let mut rects: Vec<Rect> =
-        done.iter().map(|&(c0, c1, r0, r1)| Rect { x: px(c0), y: px(r0), w: px(c1 - c0), h: px(r1 - r0) }).collect();
+    let (px_x, px_y) = (|v: usize| (v * CELL).min(w) as u16, |v: usize| (v * CELL).min(h) as u16);
+    let mut rects: Vec<Rect> = done
+        .iter()
+        .map(|&(c0, c1, r0, r1)| Rect { x: px_x(c0), y: px_y(r0), w: px_x(c1) - px_x(c0), h: px_y(r1) - px_y(r0) })
+        .collect();
     if rects.len() > NOISE_RECTS {
         return None;
     }
@@ -378,22 +378,34 @@ fn split_tile(r: &Rect) -> Vec<Rect> {
 mod tests {
     use super::*;
 
+    // tests run at windows' 1024x768 unless they say otherwise
+    const W: usize = 1024;
+    const H: usize = 768;
+
     fn blank() -> Vec<u8> {
-        vec![0u8; (STREAM_W * STREAM_H * 3) as usize]
+        vec![0u8; W * H * 3]
     }
 
     fn paint(buf: &mut [u8], x: usize, y: usize, w: usize, h: usize) {
+        paint_in(buf, W, x, y, w, h)
+    }
+
+    fn paint_in(buf: &mut [u8], stride: usize, x: usize, y: usize, w: usize, h: usize) {
         for yy in y..y + h {
             for xx in x..x + w {
-                buf[(yy * STREAM_W as usize + xx) * 3] = 200;
+                buf[(yy * stride + xx) * 3] = 200;
             }
         }
+    }
+
+    fn dirty(prev: &[u8], cur: &[u8]) -> Option<Vec<Rect>> {
+        dirty_rects(prev, cur, W, H)
     }
 
     // same frame, nothing to send
     #[test]
     fn no_change_is_empty() {
-        assert_eq!(dirty_rects(&blank(), &blank()), Some(vec![]));
+        assert_eq!(dirty(&blank(), &blank()), Some(vec![]));
     }
 
     // small change snaps out to 32px cells
@@ -401,7 +413,7 @@ mod tests {
     fn small_change_snaps_to_cells() {
         let mut cur = blank();
         paint(&mut cur, 40, 70, 10, 3);
-        assert_eq!(dirty_rects(&blank(), &cur), Some(vec![Rect { x: 32, y: 64, w: 32, h: 32 }]));
+        assert_eq!(dirty(&blank(), &cur), Some(vec![Rect { x: 32, y: 64, w: 32, h: 32 }]));
     }
 
     // two far spots stay two parts
@@ -410,7 +422,7 @@ mod tests {
         let mut cur = blank();
         paint(&mut cur, 0, 0, 5, 5);
         paint(&mut cur, 1000, 680, 5, 5);
-        let r = dirty_rects(&blank(), &cur).unwrap();
+        let r = dirty(&blank(), &cur).unwrap();
         assert_eq!(r.len(), 2);
         assert!(r.contains(&Rect { x: 992, y: 672, w: 32, h: 32 }));
     }
@@ -420,7 +432,7 @@ mod tests {
     fn column_merges() {
         let mut cur = blank();
         paint(&mut cur, 100, 100, 50, 200);
-        assert_eq!(dirty_rects(&blank(), &cur), Some(vec![Rect { x: 96, y: 96, w: 64, h: 224 }]));
+        assert_eq!(dirty(&blank(), &cur), Some(vec![Rect { x: 96, y: 96, w: 64, h: 224 }]));
     }
 
     // big change means whole frame
@@ -428,7 +440,7 @@ mod tests {
     fn big_change_is_full() {
         let mut cur = blank();
         paint(&mut cur, 0, 0, 1024, 600);
-        assert_eq!(dirty_rects(&blank(), &cur), None);
+        assert_eq!(dirty(&blank(), &cur), None);
     }
 
     // many spots merge down to few parts that still cover every spot
@@ -438,7 +450,7 @@ mod tests {
         for i in 0..10 {
             paint(&mut cur, i * 64, 300, 4, 4);
         }
-        let r = dirty_rects(&blank(), &cur).unwrap();
+        let r = dirty(&blank(), &cur).unwrap();
         assert_eq!(r.len(), MAX_RECTS);
         assert!((0..10).all(|i| r.iter().any(|p| p.x as usize <= i * 64 && i * 64 < (p.x + p.w) as usize && p.y == 288)));
         assert_eq!(r.iter().map(rect_area).sum::<u32>(), 12 * 32 * 32);
@@ -452,7 +464,7 @@ mod tests {
             paint(&mut cur, 10 + i * 64, 10, 4, 4);
             paint(&mut cur, 1000 - i * 64, 740, 4, 4);
         }
-        let r = dirty_rects(&blank(), &cur).unwrap();
+        let r = dirty(&blank(), &cur).unwrap();
         assert!(r.iter().map(rect_area).sum::<u32>() < 20 * 32 * 32, "{r:?}");
     }
 
@@ -465,7 +477,30 @@ mod tests {
                 paint(&mut cur, c * 32, r * 32, 2, 2);
             }
         }
-        assert_eq!(dirty_rects(&blank(), &cur), None);
+        assert_eq!(dirty(&blank(), &cur), None);
+    }
+
+    // 720 is not a multiple of 32: change in the last 16 rows is still seen, part clipped to the frame
+    #[test]
+    fn bottom_edge_seen_at_720p() {
+        let (w, h) = (1280, 720);
+        let (prev, mut cur) = (vec![0u8; w * h * 3], vec![0u8; w * h * 3]);
+        paint_in(&mut cur, w, 1270, 715, 4, 4);
+        assert_eq!(dirty_rects(&prev, &cur, w, h), Some(vec![Rect { x: 1248, y: 704, w: 32, h: 16 }]));
+    }
+
+    // whole-frame tiles cover every pixel once, within windows limits, budget matches windows at 1024x768
+    #[test]
+    fn keyframe_tiles_cover_frame() {
+        for (w, h) in [(1024u16, 768u16), (1280, 720), (1920, 1080)] {
+            let t = protocol::keyframe_tiles(w, h);
+            assert!(t.iter().all(|&(x, y, tw, th, _)| tw <= MAX_TILE_W && th <= MAX_TILE_H && x + tw <= w && y + th <= h));
+            assert_eq!(t.iter().map(|t| t.2 as u32 * t.3 as u32).sum::<u32>(), w as u32 * h as u32);
+        }
+        let win = protocol::keyframe_tiles(1024, 768);
+        assert_eq!(win.iter().map(|t| (t.0, t.1, t.2, t.3)).collect::<Vec<_>>(),
+                   vec![(0, 0, 624, 416), (624, 0, 400, 416), (0, 416, 624, 352), (624, 416, 400, 352)]);
+        assert!((win.iter().map(|t| t.4).sum::<usize>() as i64 - 76465).abs() < 4);
     }
 
     // wide part cut at windows tile limits, all 16-aligned
@@ -480,6 +515,6 @@ mod tests {
     // wrong size input never panics
     #[test]
     fn bad_size_is_full() {
-        assert_eq!(dirty_rects(&[0; 10], &[0; 10]), None);
+        assert_eq!(dirty(&[0; 10], &[0; 10]), None);
     }
 }
