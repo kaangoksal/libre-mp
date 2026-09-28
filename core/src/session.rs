@@ -157,6 +157,7 @@ enum Plan {
 // keep session alive, grab, send whole or changed parts, hold fps
 fn stream(client: &mut protocol::EpsonClient, grabber: &mut dyn FrameGrabber, running: &AtomicBool, full_only: bool) -> String {
     let my_ip = client.my_ip;
+    let meta = protocol::meta_display_config(STREAM_W as u16, STREAM_H as u16);
     let frame_budget = Duration::from_micros(1_000_000 / TARGET_FPS);
     let mut last_audio = Instant::now();
     let mut last_heartbeat = Instant::now();
@@ -213,7 +214,7 @@ fn stream(client: &mut protocol::EpsonClient, grabber: &mut dyn FrameGrabber, ru
                     .zip(&jpegs)
                     .map(|(&(x, y, w, h, _), jpeg)| VideoTile { jpeg, x, y, w, h })
                     .collect();
-                Some(protocol::build_video_frame(my_ip, &tiles, true))
+                Some(protocol::build_video_frame(my_ip, &tiles, Some(&meta)))
             }
             Plan::Partial(rects) => {
                 let jpegs: Vec<Vec<u8>> = rects
@@ -225,7 +226,7 @@ fn stream(client: &mut protocol::EpsonClient, grabber: &mut dyn FrameGrabber, ru
                     .zip(&jpegs)
                     .map(|(r, jpeg)| VideoTile { jpeg, x: r.x, y: r.y, w: r.w, h: r.h })
                     .collect();
-                Some(protocol::build_video_frame(my_ip, &tiles, false))
+                Some(protocol::build_video_frame(my_ip, &tiles, None))
             }
         };
         let t_encode = t0.elapsed();

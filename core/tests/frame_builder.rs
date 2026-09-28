@@ -1,7 +1,7 @@
 //! eprd builder vs real windows stream capture, byte for byte
 
 use std::net::Ipv4Addr;
-use libremp_core::protocol::{build_video_frame, tight_jpeg_prefix, VideoTile};
+use libremp_core::protocol::{build_video_frame, meta_display_config, tight_jpeg_prefix, VideoTile};
 
 // find capture file (tests run in core/)
 fn capture() -> Vec<u8> {
@@ -67,20 +67,26 @@ fn builder_reproduces_capture_first_frame_byte_for_byte() {
         .collect();
 
     // Client IP in the capture's EPRD header is 192.168.88.2.
-    let built = build_video_frame(Ipv4Addr::new(192, 168, 88, 2), &tiles, false);
+    let built = build_video_frame(Ipv4Addr::new(192, 168, 88, 2), &tiles, None);
 
     assert_eq!(built.len(), expected.len(), "frame length mismatch");
     assert!(built == expected, "frame is not byte-identical to the Windows capture");
 }
 
+// meta keeps windows' header + pixel format; size/source/rect fields describe the stream itself
 #[test]
-fn first_frame_meta_matches_capture() {
+fn meta_matches_capture_layout() {
     let buf = capture();
+    let win = &buf[20..66];
+    let m = meta_display_config(1024, 768);
+    assert_eq!(&m[..24], &win[..24], "type, frame size, pixel format as windows sends them");
+    assert_eq!(&m[24..36], &[4, 0, 3, 0, 0, 0, 0, 0, 4, 0, 3, 0], "source 1024x768, rect 0,0 1024x768");
+    assert_eq!(&m[36..], &win[36..]);
     let dummy = [0xffu8, 0xd8, 0x00, 0xff, 0xd9];
     let tiles = [VideoTile { jpeg: &dummy, x: 0, y: 0, w: 8, h: 8 }];
-    let built = build_video_frame(Ipv4Addr::new(192, 168, 88, 2), &tiles, true);
-    // First 66 bytes = EPRD header (20) + META (46), independent of the tiles.
-    assert_eq!(&built[..66], &buf[..66], "META display-config block mismatch vs capture");
+    let built = build_video_frame(Ipv4Addr::new(192, 168, 88, 2), &tiles, Some(&m));
+    assert_eq!(&built[..20], &buf[..20], "META block header");
+    assert_eq!(&built[20..66], &m);
 }
 
 // the descriptor's last u32 is the rfb tight jpeg prefix (0x90 + length), in every windows tile
@@ -140,7 +146,7 @@ fn builder_reproduces_every_captured_frame() {
         if covered < 1024 * 768 {
             partial += 1;
         }
-        assert!(build_video_frame(Ipv4Addr::new(192, 168, 88, 2), &tiles, false) == block, "block {blocks} differs");
+        assert!(build_video_frame(Ipv4Addr::new(192, 168, 88, 2), &tiles, None) == block, "block {blocks} differs");
         at += 20 + size;
         blocks += 1;
     }

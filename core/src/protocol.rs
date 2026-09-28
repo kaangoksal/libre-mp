@@ -497,15 +497,19 @@ pub fn send_frame(stream: &mut TcpStream, data: &[u8]) -> io::Result<()> {
 
 // ─── eprd frame builder ─────────────────────────────────────────────────────
 
-// 46-byte display config from windows capture, sent with whole frames
-const META_DISPLAY_CONFIG: [u8; 46] = [
-    0xcc, 0x00, 0x00, 0x00, 0x04, 0x00, 0x03, 0x00,
-    0x20, 0x20, 0x00, 0x01, 0xff, 0x00, 0xff, 0x00,
-    0xff, 0x00, 0x10, 0x08, 0x00, 0x00, 0x00, 0x00,
-    0x06, 0x40, 0x03, 0x84, 0x00, 0x00, 0x00, 0x60,
-    0x04, 0x00, 0x02, 0x40, 0x00, 0x00, 0x00, 0x00,
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-];
+// 46-byte rfb-style display config, sent with whole frames: frame size, pixel format, source size, image rect.
+// windows sends its own screen (1600x900) and letterbox rect (y=96, 1024x576) here; we describe the stream itself.
+pub fn meta_display_config(w: u16, h: u16) -> [u8; 46] {
+    let mut m = [0u8; 46];
+    m[0] = 0xcc;
+    m[4..8].copy_from_slice(&[(w >> 8) as u8, w as u8, (h >> 8) as u8, h as u8]);
+    // 32bpp, depth 32, true colour, maxima 255 (as windows writes them), shifts 16/8/0
+    m[8..24].copy_from_slice(&[0x20, 0x20, 0x00, 0x01, 0xff, 0x00, 0xff, 0x00, 0xff, 0x00, 0x10, 0x08, 0, 0, 0, 0]);
+    for (i, v) in [w, h, 0, 0, w, h].iter().enumerate() {
+        m[24 + i * 2..26 + i * 2].copy_from_slice(&v.to_be_bytes());
+    }
+    m
+}
 
 // windows 1024x768 whole-frame tiles: (x, y, w, h, jpeg size aim)
 pub const KEYFRAME_TILES: [(u16, u16, u16, u16, usize); 4] = [
@@ -531,17 +535,17 @@ pub fn tight_jpeg_prefix(len: usize) -> [u8; 4] {
 }
 
 // eprd frame from jpeg tiles, byte-same as windows. count field = tile count
-pub fn build_video_frame(my_ip: Ipv4Addr, tiles: &[VideoTile], with_meta: bool) -> Vec<u8> {
+pub fn build_video_frame(my_ip: Ipv4Addr, tiles: &[VideoTile], meta: Option<&[u8; 46]>) -> Vec<u8> {
     let ip = my_ip.octets();
     let mut buf = Vec::with_capacity(16384);
 
     // meta block first when asked (size le)
-    if with_meta {
+    if let Some(meta) = meta {
         buf.extend_from_slice(b"EPRD0600");
         buf.extend_from_slice(&ip);
         buf.extend_from_slice(&0u32.to_le_bytes()); // msg_id
-        buf.extend_from_slice(&(META_DISPLAY_CONFIG.len() as u32).to_le_bytes());
-        buf.extend_from_slice(&META_DISPLAY_CONFIG);
+        buf.extend_from_slice(&(meta.len() as u32).to_le_bytes());
+        buf.extend_from_slice(meta);
     }
 
     // payload: tile count + per tile 16-byte descriptor + jpeg
