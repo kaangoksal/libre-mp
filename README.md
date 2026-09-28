@@ -175,6 +175,25 @@ Flags:
 
 Exit status: `0` stopped by you (Ctrl+C), `2` projector unreachable or refused, `3` screen capture failed.
 
+## Python video player (`python/`)
+
+`python/epcast.py` is a small standalone Python port of the protocol for playing **video files with sound** on the projector. It needs no Rust build. It decodes any file or URL with ffmpeg, sends the picture as JPEG tiles at up to 24 fps, and sends the audio on the aux channel. The projector takes 16-bit little-endian PCM, 22050 Hz mono.
+
+```bash
+pip install -r python/requirements.txt     # Pillow; ffmpeg must be on PATH
+python3 python/epcast.py --ip <PROJECTOR_IP> movie.mkv
+python3 python/epcast.py --ip <PROJECTOR_IP> movie.mkv --ss 00:42:00 --size 1920x1080
+python3 python/epcast.py --ip <PROJECTOR_IP> test          # test pattern + 440 Hz tone
+```
+
+- `--ip <ip>` — the projector address (or set `EPSON_PROJECTOR_IP`). The computer must already be on the projector's network.
+- `--size WxH` — stream resolution (default `1280x720`). The video is letterboxed to fit.
+- `--ss <time>` — start partway into the file.
+- `--adelay <seconds>` — delay the sound if it runs ahead of the picture.
+- `--no-audio`, `--fps <n>`, `--quality <n>` — tuning.
+
+Ctrl+C stops playback and frees the projector at once. Tested on an Epson Home Cinema 1060.
+
 ## Tests
 
 ```bash
